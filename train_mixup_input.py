@@ -12,29 +12,24 @@ from tqdm import tqdm
 import mixup
 import models
 from datasets import WordDataset
+from utils import get_task_config
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Mixup for text classification')
     parser.add_argument('--name', default='cnn-text-fine-tune', type=str, help='name of the experiment')
-    parser.add_argument('--train-file', default='data/ag_news.train', type=str, help='Train csv file path')
-    parser.add_argument('--test-file', default='data/ag_news.test', type=str, help='Test csv file path')
-    parser.add_argument('--val-file', default=None, type=str, help='Test csv file path')
     parser.add_argument('--text-column', default='text', type=str, help='text column name of csv file')
     parser.add_argument('--label-column', default='label', type=str, help='column column name of csv file')
     parser.add_argument('--w2v-file', default=None, type=str, help='word embedding file')
     parser.add_argument('--cuda', default=True, type=lambda x: (str(x).lower() == 'true'), help='use cuda if available')
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--dropout', default=0.5, type=float, help='dropout rate')
+    parser.add_argument('--clip', default=3.0, type=float, help='clip gradient norm')
     parser.add_argument('--decay', default=0., type=float, help='weight decay')
     parser.add_argument('--model', default="TextCNN", type=str, help='model type (default: TextCNN)')
     parser.add_argument('--seed', default=1, type=int, help='random seed')
     parser.add_argument('--batch-size', default=64, type=int, help='batch size (default: 128)')
-    parser.add_argument('--sequence-len', default=60, type=int, help='maximum sequence length')
-    parser.add_argument('--num-class', default=4, type=int, help='number of classes (default 4)')
     parser.add_argument('--epoch', default=50, type=int, help='total epochs (default: 200)')
-    parser.add_argument('--eval-interval', default=20, type=int, help='batch size (default: 128)')
-    parser.add_argument('--patience', default=20, type=int, help='patience for early stopping')
     parser.add_argument('--fine-tune', default=True, type=lambda x: (str(x).lower() == 'true'),
                         help='whether to fine-tune embedding or not')
     parser.add_argument('--method', default='input', type=str, help='which mixing method to use (default: none)')
@@ -68,19 +63,22 @@ class Classification:
 
         mixup.use_cuda = use_cuda
 
+        self.config = get_task_config(args.task)
+
         # data loaders
-        dataset = WordDataset(args.sequence_len, args.batch_size)
-        dataset.load_data(args.train_file, args.test_file, args.val_file, args.w2v_file, args.text_column,
-                          args.label_column)
+        dataset = WordDataset(self.config.sequence_len, args.batch_size)
+        dataset.load_data(self.config.train_file, self.config.test_file, self.config.val_file, args.w2v_file,
+                          args.text_column, args.label_column)
         self.train_iterator = dataset.train_iterator
         self.val_iterator = dataset.val_iterator
         self.test_iterator = dataset.test_iterator
 
         # model
         vocab_size = len(dataset.vocab)
-        self.model = models.__dict__[args.model](vocab_size=vocab_size, sequence_len=args.sequence_len,
-                                                 num_class=args.num_class, word_embeddings=dataset.word_embeddings,
-                                                 fine_tune=args.fine_tune, dropout=args.dropout)
+        self.model = models.__dict__[args.model](vocab_size=vocab_size, sequence_len=self.config.sequence_len,
+                                                 num_class=self.config.num_class,
+                                                 word_embeddings=dataset.word_embeddings, fine_tune=args.fine_tune,
+                                                 dropout=args.dropout)
         self.device = torch.device('cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu')
         self.model.to(self.device)
 
@@ -97,7 +95,10 @@ class Classification:
 
         # optimizer
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.decay)
+        if args.task in ['trec', 'sst']:
+            self.optimizer = torch.optim.Adam(self.model.parameters())
+        else:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.decay)
 
         # for early stopping
         self.best_val_acc = 0
@@ -148,11 +149,13 @@ class Classification:
 
             self.optimizer.zero_grad()
             loss.backward()
+            if self.args.task in ['trec', 'sst1']:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
             self.optimizer.step()
 
             # eval
             self.iteration_number += 1
-            if self.iteration_number % self.args.eval_interval == 1:
+            if self.iteration_number % self.config.eval_interval == 1:
                 avg_loss = train_loss / total
                 acc = 100.0 * correct / total
                 # print('Train loss: {}, Train acc: {}'.format(avg_loss, acc))
@@ -168,7 +171,7 @@ class Classification:
                     self.val_patience = 0
                 else:
                     self.val_patience += 1
-                    if self.val_patience == self.args.patience:
+                    if self.val_patience == self.config.patience:
                         self.early_stop = True
                         return
                 with open(self.log_path, 'a', newline='') as out:
