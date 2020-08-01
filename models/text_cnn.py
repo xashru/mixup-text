@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
 
 
 embed_size = 300
@@ -8,42 +9,70 @@ num_channels = 100
 
 
 class TextCNN(nn.Module):
-    def __init__(self, vocab_size, sequence_len, num_class, word_embeddings=None, fine_tune=True):
+    def __init__(self, vocab_size, sequence_len, num_class, word_embeddings=None, fine_tune=True, dropout=0.5):
         super(TextCNN, self).__init__()
 
         self.embeddings = nn.Embedding(vocab_size, embed_size)
-        if word_embeddings:
+        self.sequence_len = sequence_len
+        if word_embeddings is not None:
             self.embeddings.weight = nn.Parameter(word_embeddings, requires_grad=fine_tune)
 
-        self.conv1 = nn.Sequential(
-            nn.Conv1d(in_channels=embed_size, out_channels=num_channels, kernel_size=kernel_size[0]),
-            nn.ReLU(),
-            nn.MaxPool1d(sequence_len - kernel_size[0] + 1)
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv1d(in_channels=embed_size, out_channels=num_channels, kernel_size=kernel_size[1]),
-            nn.ReLU(),
-            nn.MaxPool1d(sequence_len - kernel_size[1] + 1)
-        )
-        self.conv3 = nn.Sequential(
-            nn.Conv1d(in_channels=embed_size, out_channels=num_channels, kernel_size=kernel_size[2]),
-            nn.ReLU(),
-            nn.MaxPool1d(sequence_len - kernel_size[2] + 1)
-        )
-
-        self.dropout = nn.Dropout(0.5)
-
-        # Fully-Connected Layer
+        self.convs = nn.ModuleList([nn.Conv2d(1, num_channels, [k, embed_size]) for k in kernel_size])
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(num_channels * len(kernel_size), num_class)
 
     def forward(self, x):
-        embedded_sent = self.embeddings(x).permute(1, 2, 0)
+        # (batch, seq, embed)
+        x = self.embeddings(x).permute(1, 0, 2)
+        # (batch, channel, seq, embed)
+        x = torch.unsqueeze(x, 1)
 
-        conv_out1 = self.conv1(embedded_sent).squeeze(2)
-        conv_out2 = self.conv2(embedded_sent).squeeze(2)
-        conv_out3 = self.conv3(embedded_sent).squeeze(2)
+        # (batch, channel, seq-k+1)
+        x = [F.relu(conv(x)).squeeze(3) for conv in self.convs]
 
-        all_out = torch.cat((conv_out1, conv_out2, conv_out3), 1)
-        final_feature_map = self.dropout(all_out)
-        final_out = self.fc(final_feature_map)
+        # (batch, channel)
+        x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]
+
+        # (batch, #filters * channel)
+        x = torch.cat(x, 1)
+
+        x = self.dropout(x)
+
+        # (batch, #class)
+        x = self.fc(x)
+        return x
+
+    def _forward_dense(self, x):
+        x = self.embeddings(x).permute(1, 0, 2)
+        x = torch.unsqueeze(x, 1)
+        x = [F.relu(conv(x)).squeeze(3) for conv in self.convs]
+        x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]
+        x = torch.cat(x, 1)
+        x = self.dropout(x)
+        return x
+
+    def forward_mix_embed(self, x1, x2, lam):
+        x1 = self.embeddings(x1).permute(1, 0, 2)
+        x2 = self.embeddings(x2).permute(1, 0, 2)
+        x = lam * x1 + (1.0-lam) * x2
+
+        x = torch.unsqueeze(x, 1)
+        x = [F.relu(conv(x)).squeeze(3) for conv in self.convs]
+        x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]
+        x = torch.cat(x, 1)
+        x = self.dropout(x)
+        x = self.fc(x)
+        return x
+
+    def forward_mix_sent(self, x1, x2, lam):
+        y1 = self.forward(x1)
+        y2 = self.forward(x2)
+        y = lam * y1 + (1.0-lam) * y2
+        return y
+
+    def forward_mix_encoder(self, x1, x2, lam):
+        y1 = self._forward_dense(x1)
+        y2 = self._forward_dense(x2)
+        y = lam * y1 + (1.0-lam) * y2
+        final_out = self.fc(y)
         return final_out
