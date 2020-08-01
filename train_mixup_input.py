@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument('--w2v-file', default=None, type=str, help='word embedding file')
     parser.add_argument('--cuda', default=True, type=lambda x: (str(x).lower() == 'true'), help='use cuda if available')
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
+    parser.add_argument('--dropout', default=0.5, type=float, help='dropout rate')
     parser.add_argument('--decay', default=0., type=float, help='weight decay')
     parser.add_argument('--model', default="TextCNN", type=str, help='model type (default: TextCNN)')
     parser.add_argument('--seed', default=1, type=int, help='random seed')
@@ -33,10 +34,10 @@ def parse_args():
     parser.add_argument('--num-class', default=4, type=int, help='number of classes (default 4)')
     parser.add_argument('--epoch', default=50, type=int, help='total epochs (default: 200)')
     parser.add_argument('--eval-interval', default=20, type=int, help='batch size (default: 128)')
-    parser.add_argument('--patience', default=10, type=int, help='patience for early stopping')
+    parser.add_argument('--patience', default=20, type=int, help='patience for early stopping')
     parser.add_argument('--fine-tune', default=True, type=lambda x: (str(x).lower() == 'true'),
                         help='whether to fine-tune embedding or not')
-    parser.add_argument('--method', default='none', type=str, help='which mixing method to use (default: none)')
+    parser.add_argument('--method', default='input', type=str, help='which mixing method to use (default: none)')
     parser.add_argument('--alpha', default=1., type=float, help='mixup interpolation coefficient (default: 1)')
     parser.add_argument('--save-path', default='out', type=str, help='output log/result directory')
     args = parser.parse_args()
@@ -79,7 +80,7 @@ class Classification:
         vocab_size = len(dataset.vocab)
         self.model = models.__dict__[args.model](vocab_size=vocab_size, sequence_len=args.sequence_len,
                                                  num_class=args.num_class, word_embeddings=dataset.word_embeddings,
-                                                 fine_tune=args.fine_tune)
+                                                 fine_tune=args.fine_tune, dropout=args.dropout)
         self.device = torch.device('cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu')
         self.model.to(self.device)
 
@@ -103,13 +104,16 @@ class Classification:
         self.early_stop = False
         self.val_patience = 0  # successive iteration when validation acc did not improve
 
+        self.iteration_number = 0
+
     def test(self, iterator):
         self.model.eval()
         test_loss = 0
         total = 0
         correct = 0
         with torch.no_grad():
-            for _, batch in tqdm(enumerate(iterator), total=len(iterator), desc='test'):
+            # for _, batch in tqdm(enumerate(iterator), total=len(iterator), desc='test'):
+            for _, batch in enumerate(iterator):
                 x = batch.text
                 y = batch.label
                 x, y = x.to(self.device), y.to(self.device)
@@ -128,7 +132,8 @@ class Classification:
         train_loss = 0
         total = 0
         correct = 0
-        for idx, batch in tqdm(enumerate(self.train_iterator), total=len(self.train_iterator), desc='train'):
+        # for _, batch in tqdm(enumerate(self.train_iterator), total=len(self.train_iterator), desc='train'):
+        for _, batch in enumerate(self.train_iterator):
             x = batch.text
             y = batch.label
             x, y = x.to(self.device), y.to(self.device)
@@ -146,10 +151,11 @@ class Classification:
             self.optimizer.step()
 
             # eval
-            if idx % self.args.eval_interval == 1:
+            self.iteration_number += 1
+            if self.iteration_number % self.args.eval_interval == 1:
                 avg_loss = train_loss / total
                 acc = 100.0 * correct / total
-                print('Train loss: {}, Train acc: {}'.format(avg_loss, acc))
+                # print('Train loss: {}, Train acc: {}'.format(avg_loss, acc))
                 train_loss = 0
                 total = 0
                 correct = 0
@@ -167,8 +173,9 @@ class Classification:
                         return
                 with open(self.log_path, 'a', newline='') as out:
                     writer = csv.writer(out)
-                    writer.writerow(['train', epoch, idx, avg_loss, acc])
-                    writer.writerow(['val', epoch, idx, val_loss, val_acc])
+                    writer.writerow(['train', epoch, self.iteration_number, avg_loss, acc])
+                    writer.writerow(['val', epoch, self.iteration_number, val_loss, val_acc])
+                self.model.train()
 
     def run(self):
         for epoch in range(self.args.epoch):
