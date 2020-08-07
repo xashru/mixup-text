@@ -1,41 +1,64 @@
 import torch.nn as nn
+import torch
+
+embed_size = 300
+hidden_size = 100
+hidden_layers = 3
+bidirectional = True
 
 
-class TextRNN(nn.Module):
-    def __init__(self, config, vocab_size, word_embeddings):
-        super(TextRNN, self).__init__()
-        self.config = config
+class TextLSTM(nn.Module):
+    def __init__(self, vocab_size, sequence_len, num_class, word_embeddings=None, fine_tune=True, dropout=0.5):
+        super(TextLSTM, self).__init__()
 
         # Embedding Layer
-        self.embeddings = nn.Embedding(vocab_size, self.config.embed_size)
-        self.embeddings.weight = nn.Parameter(word_embeddings, requires_grad=False)
+        self.embeddings = nn.Embedding(vocab_size, embed_size)
+        self.sequence_len = sequence_len
 
-        self.lstm = nn.LSTM(input_size=self.config.embed_size,
-                            hidden_size=self.config.hidden_size,
-                            num_layers=self.config.hidden_layers,
-                            dropout=self.config.dropout_keep,
-                            bidirectional=self.config.bidirectional)
+        if word_embeddings is not None:
+            self.embeddings.weight = nn.Parameter(word_embeddings, requires_grad=fine_tune)
 
-        self.dropout = nn.Dropout(self.config.dropout_keep)
-
-        # Fully-Connected Layer
-        self.fc = nn.Linear(
-            self.config.hidden_size * self.config.hidden_layers * (1 + self.config.bidirectional),
-            self.config.output_size
-        )
-
-        # Softmax non-linearity
-        self.softmax = nn.Softmax()
+        # LSTM layer
+        self.lstm = nn.LSTM(input_size=embed_size, hidden_size=hidden_size, num_layers=hidden_layers, dropout=dropout,
+                            bidirectional=bidirectional)
+        self.fc = nn.Linear(hidden_size * hidden_layers * (1 + bidirectional), num_class)
 
     def forward(self, x):
-        # x.shape = (max_sen_len, batch_size)
-        embedded_sent = self.embeddings(x)
-        # embedded_sent.shape = (max_sen_len=20, batch_size=64,embed_size=300)
+        # (seq_len, batch, embed)
+        x = self.embeddings(x)
 
-        lstm_out, (h_n, c_n) = self.lstm(embedded_sent)
-        final_feature_map = self.dropout(h_n)  # shape=(num_layers * num_directions, 64, hidden_size)
+        _, (x, _) = self.lstm(x)
+        # (num_layers * num_directions, batch, hidden)
 
-        # Convert input to (64, hidden_size * hidden_layers * num_directions) for linear layer
-        final_feature_map = torch.cat([final_feature_map[i, :, :] for i in range(final_feature_map.shape[0])], dim=1)
-        final_out = self.fc(final_feature_map)
-        return self.softmax(final_out)
+        x = torch.cat([x[i, :, :] for i in range(x.shape[0])], dim=1)
+        # (batch, num_layers * num_directions * hidden_size)
+        x = self.fc(x)
+        return x
+
+    def _forward_dense(self, x):
+        x = self.embeddings(x)
+        _, (x, _) = self.lstm(x)
+        x = torch.cat([x[i, :, :] for i in range(x.shape[0])], dim=1)
+        return x
+
+    def forward_mix_embed(self, x1, x2, lam):
+        x1 = self.embeddings(x1)
+        x2 = self.embeddings(x2)
+        x = lam * x1 + (1.0-lam) * x2
+        _, (x, _) = self.lstm(x)
+        x = torch.cat([x[i, :, :] for i in range(x.shape[0])], dim=1)
+        x = self.fc(x)
+        return x
+
+    def forward_mix_sent(self, x1, x2, lam):
+        y1 = self.forward(x1)
+        y2 = self.forward(x2)
+        y = lam * y1 + (1.0-lam) * y2
+        return y
+
+    def forward_mix_encoder(self, x1, x2, lam):
+        y1 = self._forward_dense(x1)
+        y2 = self._forward_dense(x2)
+        y = lam * y1 + (1.0-lam) * y2
+        y = self.fc(y)
+        return y

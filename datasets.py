@@ -3,6 +3,9 @@ from torchtext import data
 import spacy
 import pandas as pd
 import pickle
+from torch.utils.data import Dataset
+import torch
+from transformers import BertTokenizer
 
 
 class WordDataset(object):
@@ -47,7 +50,7 @@ class WordDataset(object):
         tokenizer = lambda sent: [x.text for x in nlp.tokenizer(sent) if x.text != " "]
 
         # Creating Field for data
-        text = data.Field(sequential=True, tokenize=tokenizer, lower=False, fix_length=self.sequence_len)
+        text = data.Field(sequential=True, tokenize=tokenizer, lower=True, fix_length=self.sequence_len)
         label = data.Field(sequential=False, use_vocab=False)
         datafields = [("text", text), ("label", label)]
 
@@ -96,3 +99,28 @@ class WordDataset(object):
         print("Loaded {} training examples".format(len(train_data)))
         print("Loaded {} test examples".format(len(test_data)))
         print("Loaded {} validation examples".format(len(val_data)))
+
+
+class BertDataset(Dataset):
+    def __init__(self, filename, sequence_len):
+        self.df = pd.read_csv(filename, delimiter='\t')
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        self.sequence_len = sequence_len
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, index):
+        sentence = self.df.loc[index, 'text']
+        label = self.df.loc[index, 'label']
+        tokens = self.tokenizer.tokenize(sentence)
+        tokens = ['[CLS]'] + tokens + ['[SEP]']
+        if len(tokens) < self.sequence_len:
+            tokens = tokens + ['[PAD]' for _ in range(self.sequence_len - len(tokens))]
+        else:
+            tokens = tokens[:self.sequence_len - 1] + ['[SEP]']
+
+        tokens_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+        tokens_ids_tensor = torch.tensor(tokens_ids)
+        attn_mask = (tokens_ids_tensor != 0).long()
+        return tokens_ids_tensor, attn_mask, label

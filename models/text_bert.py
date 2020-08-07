@@ -210,11 +210,11 @@ class MyBertModel(BertPreTrainedModel):
 class TextBERT(nn.Module):
     def __init__(self, pretrained_model, num_class, fine_tune, dropout):
         super(TextBERT, self).__init__()
-        self.output_dim = len(num_class)
+        self.output_dim = num_class
         self.bert = MyBertModel.from_pretrained(pretrained_model)
         # Freeze bert layers
         if not fine_tune:
-            for p in self.bert_layer.parameters():
+            for p in self.bert.parameters():
                 p.requires_grad = False
 
         bert_dim = MODELS[pretrained_model][2]
