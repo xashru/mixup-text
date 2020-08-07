@@ -24,11 +24,10 @@ def parse_args():
     parser.add_argument('--cuda', default=True, type=lambda x: (str(x).lower() == 'true'), help='use cuda if available')
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--dropout', default=0.5, type=float, help='dropout rate')
-    parser.add_argument('--clip', default=3.0, type=float, help='clip gradient norm')
     parser.add_argument('--decay', default=0., type=float, help='weight decay')
     parser.add_argument('--model', default="TextCNN", type=str, help='model type (default: TextCNN)')
     parser.add_argument('--seed', default=1, type=int, help='random seed')
-    parser.add_argument('--batch-size', default=64, type=int, help='batch size (default: 128)')
+    parser.add_argument('--batch-size', default=50, type=int, help='batch size (default: 128)')
     parser.add_argument('--epoch', default=50, type=int, help='total epochs (default: 200)')
     parser.add_argument('--fine-tune', default=True, type=lambda x: (str(x).lower() == 'true'),
                         help='whether to fine-tune embedding or not')
@@ -95,10 +94,7 @@ class Classification:
 
         # optimizer
         self.criterion = nn.CrossEntropyLoss()
-        if args.task in ['trec', 'sst']:
-            self.optimizer = torch.optim.Adam(self.model.parameters())
-        else:
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.decay)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.decay)
 
         # for early stopping
         self.best_val_acc = 0
@@ -149,8 +145,6 @@ class Classification:
 
             self.optimizer.zero_grad()
             loss.backward()
-            if self.args.task in ['trec', 'sst1']:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
             self.optimizer.step()
 
             # eval

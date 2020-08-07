@@ -9,10 +9,11 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 from tqdm import tqdm
 
-import mixup
 import models
-from datasets import WordDataset
+from datasets import BertDataset
 from utils import get_task_config
+from models.config import MODELS
+from transformers import *
 
 
 def parse_args():
@@ -21,18 +22,19 @@ def parse_args():
     parser.add_argument('--name', default='cnn-text-fine-tune', type=str, help='name of the experiment')
     parser.add_argument('--text-column', default='text', type=str, help='text column name of csv file')
     parser.add_argument('--label-column', default='label', type=str, help='column column name of csv file')
-    parser.add_argument('--w2v-file', default=None, type=str, help='word embedding file')
     parser.add_argument('--cuda', default=True, type=lambda x: (str(x).lower() == 'true'), help='use cuda if available')
-    parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
+    parser.add_argument('--lr', default=1e-5, type=float, help='learning rate')
     parser.add_argument('--dropout', default=0.5, type=float, help='dropout rate')
     parser.add_argument('--decay', default=0., type=float, help='weight decay')
-    parser.add_argument('--model', default="TextCNN", type=str, help='model type (default: TextCNN)')
+    parser.add_argument('--model', default="bert-base-uncased", type=str, help='pretrained BERT model name')
     parser.add_argument('--seed', default=1, type=int, help='random seed')
     parser.add_argument('--batch-size', default=50, type=int, help='batch size (default: 128)')
-    parser.add_argument('--epoch', default=50, type=int, help='total epochs (default: 200)')
+    parser.add_argument('--epoch', default=20, type=int, help='total epochs (default: 200)')
     parser.add_argument('--fine-tune', default=True, type=lambda x: (str(x).lower() == 'true'),
                         help='whether to fine-tune embedding or not')
     parser.add_argument('--save-path', default='out', type=str, help='output log/result directory')
+    parser.add_argument('--method', default='none', type=str, help='which mixing method to use (default: none)')
+    parser.add_argument('--alpha', default=1., type=float, help='mixup interpolation coefficient (default: 1)')
     args = parser.parse_args()
     return args
 
@@ -41,7 +43,7 @@ class Classification:
     def __init__(self, args):
         self.args = args
 
-        use_cuda = args.cuda and torch.cuda.is_available()
+        self.use_cuda = args.cuda and torch.cuda.is_available()
 
         # for reproducibility
         torch.manual_seed(args.seed)
@@ -50,24 +52,28 @@ class Classification:
         np.random.seed(args.seed)
         random.seed(args.seed)
 
-        mixup.use_cuda = use_cuda
-
         self.config = get_task_config(args.task)
 
         # data loaders
-        dataset = WordDataset(self.config.sequence_len, args.batch_size)
-        dataset.load_data(self.config.train_file, self.config.test_file, self.config.val_file, args.w2v_file,
-                          args.text_column, args.label_column)
-        self.train_iterator = dataset.train_iterator
-        self.val_iterator = dataset.val_iterator
-        self.test_iterator = dataset.test_iterator
+        train_dataset = BertDataset(self.config.train_file, self.config.sequence_len)
+        test_dataset = BertDataset(self.config.test_file, self.config.sequence_len)
+
+        if self.config.val_file is None:
+            train_samples = int(len(train_dataset) * 0.9)
+            val_samples = len(train_dataset) - train_samples
+            train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_samples, val_samples])
+        else:
+            val_dataset = BertDataset(self.config.val_file, self.config.sequence_len)
+
+        self.train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+        self.val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+        self.test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
         # model
-        vocab_size = len(dataset.vocab)
-        self.model = models.__dict__[args.model](vocab_size=vocab_size, sequence_len=self.config.sequence_len,
-                                                 num_class=self.config.num_class,
-                                                 word_embeddings=dataset.word_embeddings, fine_tune=args.fine_tune,
-                                                 dropout=args.dropout)
+        if MODELS[args.model][0] == BertModel:
+            self.model = models.TextBERT(pretrained_model=args.model, num_class=self.config.num_class,
+                                         fine_tune=args.fine_tune, dropout=args.dropout)
+
         self.device = torch.device('cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu')
         self.model.to(self.device)
 
@@ -93,18 +99,27 @@ class Classification:
 
         self.iteration_number = 0
 
-    def test(self, iterator):
+    def get_perm(self, x):
+        """get random permutation"""
+        batch_size = x.size()[0]
+        if self.use_cuda:
+            index = torch.randperm(batch_size).cuda()
+        else:
+            index = torch.randperm(batch_size)
+        return index
+
+    def mixup_criterion_cross_entropy(self, pred, y_a, y_b, lam):
+        return lam * self.criterion(pred, y_a) + (1 - lam) * self.criterion(pred, y_b)
+
+    def test(self, loader):
         self.model.eval()
         test_loss = 0
         total = 0
         correct = 0
         with torch.no_grad():
-            # for _, batch in tqdm(enumerate(iterator), total=len(iterator), desc='test'):
-            for _, batch in enumerate(iterator):
-                x = batch.text
-                y = batch.label
-                x, y = x.to(self.device), y.to(self.device)
-                y_pred = self.model(x)
+            for x, att, y in loader:
+                x, y, att = x.to(self.device), y.to(self.device), att.to(self.device)
+                y_pred = self.model(x, att)
                 loss = self.criterion(y_pred, y)
                 test_loss += loss.item() * y.shape[0]
                 total += y.shape[0]
@@ -119,12 +134,9 @@ class Classification:
         train_loss = 0
         total = 0
         correct = 0
-        # for _, batch in tqdm(enumerate(self.train_iterator), total=len(self.train_iterator), desc='train'):
-        for _, batch in enumerate(self.train_iterator):
-            x = batch.text
-            y = batch.label
-            x, y = x.to(self.device), y.to(self.device)
-            y_pred = self.model(x)
+        for x, att, y in self.train_loader:
+            x, y, att = x.to(self.device), y.to(self.device), att.to(self.device)
+            y_pred = self.model(x, att)
             loss = self.criterion(y_pred, y)
             train_loss += loss.item() * y.shape[0]
             total += y.shape[0]
@@ -144,7 +156,67 @@ class Classification:
                 total = 0
                 correct = 0
 
-                val_loss, val_acc = self.test(iterator=self.val_iterator)
+                val_loss, val_acc = self.test(self.val_loader)
+                # print('Val loss: {}, Val acc: {}'.format(val_loss, val_acc))
+                if val_acc > self.best_val_acc:
+                    torch.save(self.model.state_dict(), self.model_save_path)
+                    self.best_val_acc = val_acc
+                    self.val_patience = 0
+                else:
+                    self.val_patience += 1
+                    if self.val_patience == self.config.patience:
+                        self.early_stop = True
+                        return
+                with open(self.log_path, 'a', newline='') as out:
+                    writer = csv.writer(out)
+                    writer.writerow(['train', epoch, self.iteration_number, avg_loss, acc])
+                    writer.writerow(['val', epoch, self.iteration_number, val_loss, val_acc])
+                self.model.train()
+
+    def train_mixup(self, epoch):
+        self.model.train()
+        train_loss = 0
+        total = 0
+        correct = 0
+        for x, att, y in self.train_loader:
+            x, y, att = x.to(self.device), y.to(self.device), att.to(self.device)
+            lam = np.random.beta(self.args.alpha, self.args.alpha)
+            index = self.get_perm(x)
+            x1 = x[index]
+            y1 = y[index]
+            att1 = att[index]
+
+            if self.args.method == 'embed':
+                y_pred = self.model.forward_mix_embed(x, att, x1, att1, lam)
+            elif self.args.method == 'sent':
+                y_pred = self.model.forward_mix_sent(x, att, x1, att1, lam)
+            elif self.args.method == 'dense':
+                y_pred = self.model.forward_mix_encoder(x, att, x1, att1, lam)
+            else:
+                raise ValueError('invalid method name')
+
+            loss = self.mixup_criterion_cross_entropy(y_pred, y, y1, lam)
+            train_loss += loss.item() * y.shape[0]
+            total += y.shape[0]
+            _, predicted = torch.max(y_pred.data, 1)
+            correct += ((lam * predicted.eq(y.data).cpu().sum().float()
+                         + (1 - lam) * predicted.eq(y1.data).cpu().sum().float())).item()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            # eval
+            self.iteration_number += 1
+            if self.iteration_number % self.config.eval_interval == 0:
+                avg_loss = train_loss / total
+                acc = 100.0 * correct / total
+                # print('Train loss: {}, Train acc: {}'.format(avg_loss, acc))
+                train_loss = 0
+                total = 0
+                correct = 0
+
+                val_loss, val_acc = self.test(self.val_loader)
                 # print('Val loss: {}, Val acc: {}'.format(val_loss, val_acc))
                 if val_acc > self.best_val_acc:
                     torch.save(self.model.state_dict(), self.model_save_path)
@@ -164,16 +236,19 @@ class Classification:
     def run(self):
         for epoch in range(self.args.epoch):
             print('------------------------------------- Epoch {} -------------------------------------'.format(epoch))
-            self.train(epoch)
+            if self.args.method == 'none':
+                self.train(epoch)
+            else:
+                self.train_mixup(epoch)
             if self.early_stop:
                 break
         print('Training complete!')
         print('Best Validation Acc: ', self.best_val_acc)
 
         self.model.load_state_dict(torch.load(self.model_save_path))
-        train_loss, train_acc = self.test(self.train_iterator)
-        val_loss, val_acc = self.test(self.val_iterator)
-        test_loss, test_acc = self.test(self.test_iterator)
+        train_loss, train_acc = self.test(self.train_loader)
+        val_loss, val_acc = self.test(self.val_loader)
+        test_loss, test_acc = self.test(self.test_loader)
 
         with open(self.log_path, 'a', newline='') as out:
             writer = csv.writer(out)

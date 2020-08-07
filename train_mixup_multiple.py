@@ -6,6 +6,9 @@ NUM_RUNS = 10
 
 args = train.parse_args()
 
+if args.task in ['dbpedia', 'yahoo']:
+    NUM_RUNS = 3
+
 test_acc = []
 val_acc = []
 

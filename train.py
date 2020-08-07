@@ -25,17 +25,22 @@ def parse_args():
     parser.add_argument('--cuda', default=True, type=lambda x: (str(x).lower() == 'true'), help='use cuda if available')
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--dropout', default=0.5, type=float, help='dropout rate')
-    parser.add_argument('--clip', default=3.0, type=float, help='clip gradient norm')
     parser.add_argument('--decay', default=0., type=float, help='weight decay')
     parser.add_argument('--model', default="TextCNN", type=str, help='model type (default: TextCNN)')
     parser.add_argument('--seed', default=1, type=int, help='random seed')
-    parser.add_argument('--batch-size', default=64, type=int, help='batch size (default: 128)')
+    parser.add_argument('--batch-size', default=50, type=int, help='batch size (default: 128)')
     parser.add_argument('--epoch', default=50, type=int, help='total epochs (default: 200)')
     parser.add_argument('--fine-tune', default=True, type=lambda x: (str(x).lower() == 'true'),
                         help='whether to fine-tune embedding or not')
+    parser.add_argument('--method', default='embed', type=str, help='which mixing method to use (default: none)')
+    parser.add_argument('--alpha', default=1., type=float, help='mixup interpolation coefficient (default: 1)')
     parser.add_argument('--save-path', default='out', type=str, help='output log/result directory')
     args = parser.parse_args()
     return args
+
+
+def mixup_criterion_cross_entropy(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 
 class Classification:
@@ -85,10 +90,7 @@ class Classification:
 
         # optimizer
         self.criterion = nn.CrossEntropyLoss()
-        if args.task in ['trec', 'sst1']:
-            self.optimizer = torch.optim.Adam(self.model.parameters())
-        else:
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.decay)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.decay)
 
         # for early stopping
         self.best_val_acc = 0
@@ -136,8 +138,68 @@ class Classification:
 
             self.optimizer.zero_grad()
             loss.backward()
-            if self.args.task in ['trec', 'sst1']:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
+            self.optimizer.step()
+
+            # eval
+            self.iteration_number += 1
+            if self.iteration_number % self.config.eval_interval == 0:
+                avg_loss = train_loss / total
+                acc = 100.0 * correct / total
+                # print('Train loss: {}, Train acc: {}'.format(avg_loss, acc))
+                train_loss = 0
+                total = 0
+                correct = 0
+
+                val_loss, val_acc = self.test(iterator=self.val_iterator)
+                # print('Val loss: {}, Val acc: {}'.format(val_loss, val_acc))
+                if val_acc > self.best_val_acc:
+                    torch.save(self.model.state_dict(), self.model_save_path)
+                    self.best_val_acc = val_acc
+                    self.val_patience = 0
+                else:
+                    self.val_patience += 1
+                    if self.val_patience == self.config.patience:
+                        self.early_stop = True
+                        return
+                with open(self.log_path, 'a', newline='') as out:
+                    writer = csv.writer(out)
+                    writer.writerow(['train', epoch, self.iteration_number, avg_loss, acc])
+                    writer.writerow(['val', epoch, self.iteration_number, val_loss, val_acc])
+                self.model.train()
+
+    def train_mixup(self, epoch):
+        self.model.train()
+        train_loss = 0
+        total = 0
+        correct = 0
+        # for _, batch in tqdm(enumerate(self.train_iterator), total=len(self.train_iterator), desc='train'):
+        for _, batch in enumerate(self.train_iterator):
+            x = batch.text
+            y = batch.label
+            x, y = x.to(self.device), y.to(self.device)
+            lam = np.random.beta(self.args.alpha, self.args.alpha)
+            index = mixup.get_perm(x)
+            x1 = x[:, index]
+            y1 = y[index]
+
+            if self.args.method == 'embed':
+                y_pred = self.model.forward_mix_embed(x, x1, lam)
+            elif self.args.method == 'sent':
+                y_pred = self.model.forward_mix_sent(x, x1, lam)
+            elif self.args.method == 'dense':
+                y_pred = self.model.forward_mix_encoder(x, x1, lam)
+            else:
+                raise ValueError('invalid method name')
+
+            loss = mixup_criterion_cross_entropy(self.criterion, y_pred, y, y1, lam)
+            train_loss += loss.item() * y.shape[0]
+            total += y.shape[0]
+            _, predicted = torch.max(y_pred.data, 1)
+            correct += ((lam * predicted.eq(y.data).cpu().sum().float()
+                         + (1 - lam) * predicted.eq(y1.data).cpu().sum().float())).item()
+
+            self.optimizer.zero_grad()
+            loss.backward()
             self.optimizer.step()
 
             # eval
@@ -170,7 +232,10 @@ class Classification:
     def run(self):
         for epoch in range(self.args.epoch):
             print('------------------------------------- Epoch {} -------------------------------------'.format(epoch))
-            self.train(epoch)
+            if self.args.method == 'none':
+                self.train(epoch)
+            else:
+                self.train_mixup(epoch)
             if self.early_stop:
                 break
         print('Training complete!')
