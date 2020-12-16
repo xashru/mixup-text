@@ -29,6 +29,7 @@ TOKEN_IDX = {
 }
 
 # pretrained model name: (model class, model tokenizer, output dimension, token style)
+# only BERT variants are implemented for mixup
 MODELS = {
     'bert-base-uncased': (BertModel, BertTokenizer, 768, 'bert'),
     'bert-large-uncased': (BertModel, BertTokenizer, 1024, 'bert'),

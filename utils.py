@@ -58,6 +58,14 @@ def get_task_config(task_name):
         config.sequence_len = 200
         config.eval_interval = 200
         config.patience = 20
+    elif task_name == 'yelp-polar':
+        config.num_class = 2
+        config.train_file = 'data/yelp-polar/train.csv'
+        config.val_file = None
+        config.test_file = 'data/yelp-polar/test.csv'
+        config.sequence_len = 400
+        config.eval_interval = 200
+        config.patience = 20
     else:
         raise ValueError('Task not supported')
     return config

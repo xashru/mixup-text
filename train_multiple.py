@@ -1,4 +1,4 @@
-import train
+import train_bert as train
 import numpy as np
 
 NUM_RUNS = 10

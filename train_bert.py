@@ -190,7 +190,7 @@ class Classification:
                 y_pred = self.model.forward_mix_embed(x, att, x1, att1, lam)
             elif self.args.method == 'sent':
                 y_pred = self.model.forward_mix_sent(x, att, x1, att1, lam)
-            elif self.args.method == 'dense':
+            elif self.args.method == 'encoder':
                 y_pred = self.model.forward_mix_encoder(x, att, x1, att1, lam)
             else:
                 raise ValueError('invalid method name')

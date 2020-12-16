@@ -81,9 +81,3 @@ def preprocess_text(text, accented_chars=True, contractions=True, convert_num=Fa
 
     clean_text = ' '.join(clean_text)
     return clean_text
-
-
-if __name__ == '__main__':
-    s = "you're doomed. WhaT're you talking about?"
-    t = preprocess_text(s)
-    print(t)

@@ -9,7 +9,6 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 from tqdm import tqdm
 
-import mixup
 import models
 from datasets import WordDataset
 from utils import get_task_config
@@ -47,7 +46,7 @@ class Classification:
     def __init__(self, args):
         self.args = args
 
-        use_cuda = args.cuda and torch.cuda.is_available()
+        self.use_cuda = args.cuda and torch.cuda.is_available()
 
         # for reproducibility
         torch.manual_seed(args.seed)
@@ -55,8 +54,6 @@ class Classification:
         torch.backends.cudnn.benchmark = False
         np.random.seed(args.seed)
         random.seed(args.seed)
-
-        mixup.use_cuda = use_cuda
 
         self.config = get_task_config(args.task)
 
@@ -98,6 +95,15 @@ class Classification:
         self.val_patience = 0  # successive iteration when validation acc did not improve
 
         self.iteration_number = 0
+
+    def get_perm(self, x):
+        """get random permutation"""
+        batch_size = x.size()[0]
+        if self.use_cuda:
+            index = torch.randperm(batch_size).cuda()
+        else:
+            index = torch.randperm(batch_size)
+        return index
 
     def test(self, iterator):
         self.model.eval()
@@ -178,7 +184,7 @@ class Classification:
             y = batch.label
             x, y = x.to(self.device), y.to(self.device)
             lam = np.random.beta(self.args.alpha, self.args.alpha)
-            index = mixup.get_perm(x)
+            index = self.get_perm(x)
             x1 = x[:, index]
             y1 = y[index]
 
@@ -186,7 +192,7 @@ class Classification:
                 y_pred = self.model.forward_mix_embed(x, x1, lam)
             elif self.args.method == 'sent':
                 y_pred = self.model.forward_mix_sent(x, x1, lam)
-            elif self.args.method == 'dense':
+            elif self.args.method == 'encoder':
                 y_pred = self.model.forward_mix_encoder(x, x1, lam)
             else:
                 raise ValueError('invalid method name')
@@ -242,17 +248,17 @@ class Classification:
         print('Best Validation Acc: ', self.best_val_acc)
 
         self.model.load_state_dict(torch.load(self.model_save_path))
-        train_loss, train_acc = self.test(self.train_iterator)
+        # train_loss, train_acc = self.test(self.train_iterator)
         val_loss, val_acc = self.test(self.val_iterator)
         test_loss, test_acc = self.test(self.test_iterator)
 
         with open(self.log_path, 'a', newline='') as out:
             writer = csv.writer(out)
-            writer.writerow(['train', -1, -1, train_loss, train_acc])
+            # writer.writerow(['train', -1, -1, train_loss, train_acc])
             writer.writerow(['val', -1, -1, val_loss, val_acc])
             writer.writerow(['test', -1, -1, test_loss, test_acc])
 
-        print('Train loss: {}, Train acc: {}'.format(train_loss, train_acc))
+        # print('Train loss: {}, Train acc: {}'.format(train_loss, train_acc))
         print('Val loss: {}, Val acc: {}'.format(val_loss, val_acc))
         print('Test loss: {}, Test acc: {}'.format(test_loss, test_acc))
 
