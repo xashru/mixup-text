@@ -264,5 +264,24 @@ class Classification:
 
 
 if __name__ == '__main__':
-    cls = Classification(parse_args())
-    cls.run()
+    args = parse_args()
+    num_runs = args.num_runs
+
+    test_acc = []
+    val_acc = []
+
+    for i in range(num_runs):
+        cls = Classification(args)
+        val, test = cls.run()
+        val_acc.append(val)
+        test_acc.append(test)
+        args.seed += 1
+
+    with open(os.path.join(args.save_path, args.name + '_result.txt', 'a')) as f:
+        f.write(str(args))
+        f.write('val acc:' + str(val_acc) + '\n')
+        f.write('test acc:' + str(test_acc) + '\n')
+        f.write('mean val acc:' + str(np.mean(val_acc)) + '\n')
+        f.write('std val acc:' + str(np.std(val_acc, ddof=1)) + '\n')
+        f.write('mean test acc:' + str(np.mean(test_acc)) + '\n')
+        f.write('std test acc:' + str(np.std(test_acc, ddof=1)) + '\n\n\n')
